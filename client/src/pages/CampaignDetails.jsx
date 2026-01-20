@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { HiClock, HiUsers, HiShare, HiHeart, HiUser } from 'react-icons/hi';
+import { HiClock, HiUsers, HiShare, HiHeart, HiUser, HiX } from 'react-icons/hi';
 import { campaignsAPI, donationsAPI } from '../services/api';
 import { useAuth } from '../context/AuthContext';
 import CampaignProgress from '../components/campaign/CampaignProgress';
@@ -9,16 +9,25 @@ import Loader from '../components/common/Loader';
 import { formatCurrency, formatDate, getDaysRemaining, getCategoryLabel } from '../utils/helpers';
 import toast from 'react-hot-toast';
 
+// Razorpay Key ID from environment or fallback
+const RAZORPAY_KEY_ID = import.meta.env.VITE_RAZORPAY_KEY_ID || 'rzp_test_S5nRTleVBjqKri';
+
 const CampaignDetails = () => {
     const { id } = useParams();
     const navigate = useNavigate();
-    const { isAuthenticated } = useAuth();
+    const { isAuthenticated, user } = useAuth();
     const [campaign, setCampaign] = useState(null);
     const [donations, setDonations] = useState([]);
     const [loading, setLoading] = useState(true);
     const [donating, setDonating] = useState(false);
     const [donationAmount, setDonationAmount] = useState('');
     const [showDonateModal, setShowDonateModal] = useState(false);
+
+    // Donation form state
+    const [donorName, setDonorName] = useState('');
+    const [donorEmail, setDonorEmail] = useState('');
+    const [donorMessage, setDonorMessage] = useState('');
+    const [isAnonymous, setIsAnonymous] = useState(false);
 
     useEffect(() => {
         const fetchData = async () => {
@@ -40,13 +49,140 @@ const CampaignDetails = () => {
         fetchData();
     }, [id, navigate]);
 
+    // Pre-fill donor details if user is authenticated
+    useEffect(() => {
+        if (user) {
+            setDonorName(user.name || '');
+            setDonorEmail(user.email || '');
+        }
+    }, [user]);
+
     const handleDonate = () => {
         if (!isAuthenticated) {
             toast.error('Please login to donate');
             navigate('/login');
             return;
         }
+
+        if (!donationAmount || parseFloat(donationAmount) < 1) {
+            toast.error('Please enter a valid donation amount');
+            return;
+        }
+
         setShowDonateModal(true);
+    };
+
+    const handleCloseDonateModal = () => {
+        setShowDonateModal(false);
+        setDonorMessage('');
+        setIsAnonymous(false);
+    };
+
+    const initializeRazorpayPayment = async () => {
+        if (!donorName.trim() || !donorEmail.trim()) {
+            toast.error('Please enter your name and email');
+            return;
+        }
+
+        // Validate email format
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (!emailRegex.test(donorEmail)) {
+            toast.error('Please enter a valid email address');
+            return;
+        }
+
+        setDonating(true);
+
+        try {
+            // Step 1: Create order on backend
+            const orderResponse = await donationsAPI.createOrder({
+                campaignId: id,
+                amount: parseFloat(donationAmount),
+                donorName: isAnonymous ? 'Anonymous' : donorName,
+                donorEmail,
+                message: donorMessage,
+                isAnonymous
+            });
+
+            const { orderId, amount, currency, donationId } = orderResponse.data;
+
+            // Step 2: Initialize Razorpay checkout
+            const options = {
+                key: RAZORPAY_KEY_ID,
+                amount: amount, // Amount in paise from backend
+                currency: currency,
+                name: 'CharityHub',
+                description: `Donation for: ${campaign.title}`,
+                order_id: orderId,
+                handler: async function (response) {
+                    // Step 3: Verify payment on backend
+                    try {
+                        const verifyResponse = await donationsAPI.verifyPayment({
+                            razorpayOrderId: response.razorpay_order_id,
+                            razorpayPaymentId: response.razorpay_payment_id,
+                            razorpaySignature: response.razorpay_signature,
+                            donationId
+                        });
+
+                        if (verifyResponse.data) {
+                            toast.success('Thank you for your donation! 🎉');
+                            handleCloseDonateModal();
+                            setDonationAmount('');
+
+                            // Refresh campaign data to update raised amount
+                            const updatedCampaign = await campaignsAPI.getById(id);
+                            setCampaign(updatedCampaign.data);
+
+                            // Refresh donations list
+                            const updatedDonations = await donationsAPI.getByCampaign(id, { limit: 5 });
+                            setDonations(updatedDonations.data.donations);
+                        }
+                    } catch (verifyError) {
+                        console.error('Payment verification failed:', verifyError);
+                        toast.error('Payment verification failed. Please contact support.');
+                    }
+                },
+                prefill: {
+                    name: donorName,
+                    email: donorEmail
+                },
+                notes: {
+                    campaignId: id,
+                    donationId: donationId
+                },
+                theme: {
+                    color: '#8B5CF6' // Primary purple color to match the theme
+                },
+                modal: {
+                    ondismiss: function () {
+                        setDonating(false);
+                        toast.error('Payment was cancelled');
+                    }
+                }
+            };
+
+            // Check if Razorpay is loaded
+            if (typeof window.Razorpay === 'undefined') {
+                toast.error('Payment service is not available. Please refresh the page.');
+                setDonating(false);
+                return;
+            }
+
+            const razorpay = new window.Razorpay(options);
+            razorpay.on('payment.failed', function (response) {
+                console.error('Payment failed:', response.error);
+                toast.error(`Payment failed: ${response.error.description}`);
+                setDonating(false);
+            });
+
+            razorpay.open();
+            setDonating(false);
+
+        } catch (error) {
+            console.error('Error creating order:', error);
+            toast.error(error.response?.data?.message || 'Failed to initiate payment. Please try again.');
+            setDonating(false);
+        }
     };
 
     const handleShare = () => {
@@ -169,8 +305,8 @@ const CampaignDetails = () => {
                                             key={amount}
                                             onClick={() => setDonationAmount(amount.toString())}
                                             className={`py-2 rounded-lg font-medium transition-all ${donationAmount === amount.toString()
-                                                    ? 'bg-primary-500 text-white'
-                                                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                                                ? 'bg-primary-500 text-white'
+                                                : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
                                                 }`}
                                         >
                                             ₹{amount.toLocaleString()}
@@ -224,8 +360,134 @@ const CampaignDetails = () => {
                     </div>
                 </div>
             </div>
+
+            {/* Donation Modal */}
+            {showDonateModal && (
+                <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+                    <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full max-h-[90vh] overflow-y-auto">
+                        {/* Modal Header */}
+                        <div className="flex items-center justify-between p-6 border-b border-gray-100">
+                            <div>
+                                <h2 className="text-xl font-bold text-gray-900">Complete Your Donation</h2>
+                                <p className="text-sm text-gray-500 mt-1">
+                                    Donating {formatCurrency(parseFloat(donationAmount))} to {campaign.title}
+                                </p>
+                            </div>
+                            <button
+                                onClick={handleCloseDonateModal}
+                                className="p-2 hover:bg-gray-100 rounded-full transition-colors"
+                            >
+                                <HiX className="w-5 h-5 text-gray-500" />
+                            </button>
+                        </div>
+
+                        {/* Modal Body */}
+                        <div className="p-6 space-y-4">
+                            {/* Donor Name */}
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-2">
+                                    Your Name *
+                                </label>
+                                <input
+                                    type="text"
+                                    value={donorName}
+                                    onChange={(e) => setDonorName(e.target.value)}
+                                    placeholder="Enter your name"
+                                    className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:outline-none focus:border-primary-500"
+                                    disabled={isAnonymous}
+                                />
+                            </div>
+
+                            {/* Donor Email */}
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-2">
+                                    Email Address *
+                                </label>
+                                <input
+                                    type="email"
+                                    value={donorEmail}
+                                    onChange={(e) => setDonorEmail(e.target.value)}
+                                    placeholder="Enter your email"
+                                    className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:outline-none focus:border-primary-500"
+                                />
+                                <p className="text-xs text-gray-400 mt-1">
+                                    Receipt will be sent to this email
+                                </p>
+                            </div>
+
+                            {/* Message */}
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-2">
+                                    Leave a Message (Optional)
+                                </label>
+                                <textarea
+                                    value={donorMessage}
+                                    onChange={(e) => setDonorMessage(e.target.value)}
+                                    placeholder="Write a message of support..."
+                                    rows={3}
+                                    className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:outline-none focus:border-primary-500 resize-none"
+                                />
+                            </div>
+
+                            {/* Anonymous Toggle */}
+                            <div className="flex items-center gap-3">
+                                <input
+                                    type="checkbox"
+                                    id="anonymous"
+                                    checked={isAnonymous}
+                                    onChange={(e) => setIsAnonymous(e.target.checked)}
+                                    className="w-4 h-4 text-primary-500 rounded focus:ring-primary-500"
+                                />
+                                <label htmlFor="anonymous" className="text-sm text-gray-700">
+                                    Make my donation anonymous
+                                </label>
+                            </div>
+
+                            {/* Summary */}
+                            <div className="bg-gray-50 rounded-xl p-4 mt-4">
+                                <div className="flex justify-between items-center">
+                                    <span className="text-gray-600">Donation Amount</span>
+                                    <span className="text-xl font-bold text-primary-600">
+                                        {formatCurrency(parseFloat(donationAmount))}
+                                    </span>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Modal Footer */}
+                        <div className="p-6 border-t border-gray-100">
+                            <Button
+                                variant="primary"
+                                fullWidth
+                                size="lg"
+                                onClick={initializeRazorpayPayment}
+                                disabled={donating}
+                            >
+                                {donating ? (
+                                    <>
+                                        <svg className="animate-spin -ml-1 mr-2 h-5 w-5 text-white" fill="none" viewBox="0 0 24 24">
+                                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                        </svg>
+                                        Processing...
+                                    </>
+                                ) : (
+                                    <>
+                                        <HiHeart />
+                                        Proceed to Payment
+                                    </>
+                                )}
+                            </Button>
+                            <p className="text-xs text-center text-gray-400 mt-3">
+                                Secured by Razorpay. Your payment details are encrypted.
+                            </p>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 };
 
 export default CampaignDetails;
+
