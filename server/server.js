@@ -34,7 +34,7 @@ app.use(helmet({
             imgSrc: ["'self'", "data:", "https:"],
             scriptSrc: ["'self'", "https://checkout.razorpay.com"],
             frameSrc: ["'self'", "https://api.razorpay.com"],
-            connectSrc: ["'self'", "https://api.razorpay.com", process.env.CLIENT_URL || 'http://localhost:5173']
+            connectSrc: ["'self'", "https://api.razorpay.com", process.env.CLIENT_URL || 'https://charity-website-gdnu.onrender.com']
         }
     },
     crossOriginEmbedderPolicy: false
@@ -42,7 +42,7 @@ app.use(helmet({
 
 // CORS configuration
 app.use(cors({
-    origin: process.env.CLIENT_URL || 'http://localhost:5173',
+    origin: process.env.CLIENT_URL || 'https://charity-website-gdnu.onrender.com',
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
     allowedHeaders: ['Content-Type', 'Authorization']
