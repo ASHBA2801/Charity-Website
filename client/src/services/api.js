@@ -1,8 +1,10 @@
 import axios from 'axios';
 
 // Create axios instance with default config
+// In production, VITE_API_URL should point to Render backend (e.g., https://charity-website-gdnu.onrender.com/api)
+// In development, falls back to /api which Vite proxies to the backend
 const api = axios.create({
-    baseURL: '/api',
+    baseURL: import.meta.env.VITE_API_URL || '/api',
     headers: {
         'Content-Type': 'application/json'
     }
